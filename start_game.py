@@ -1,15 +1,15 @@
-import pygame
 import random
 import math
+import pygame
 
 pygame.init()
 screen = pygame.display.set_mode((800, 600))
-pygame.display.set_caption("MCivil War Game")
+pygame.display.set_caption("Civil War Game")
 clock = pygame.time.Clock()
-DOT_RADIUS = 10
-SHOOT_SPEED = 8
+SOLDIER_RADIUS = 9
+SHOOT_SPEED = 9
 MISS_OFFSET_VALUE = 20
-SHOT_EXTENSION = 100  # Distance to extend bullet past target on miss
+SHOT_EXTENSION = 100
 SHOT_COOLDOWN = 1000
 BASE_HIT_CHANCE = 0.5
 ANIMATION_DELAY = 500
@@ -40,16 +40,12 @@ class Shot:
         if hit:
             self.destination = target.pos
         else:
-            # Calculate perpendicular unit vector
             perp_x = -dir_y
             perp_y = dir_x
-            # Randomly choose direction for offset
             offset_direction = random.choice([-1, 1])
-            # Calculate miss destination: extend beyond target with perpendicular offset
             self.destination = (
                 target.pos[0] + dir_x * SHOT_EXTENSION + perp_x * miss_offset * offset_direction,
-                target.pos[1] + dir_y * SHOT_EXTENSION + perp_y * miss_offset * offset_direction
-            )
+                target.pos[1] + dir_y * SHOT_EXTENSION + perp_y * miss_offset * offset_direction)
         total_dx = self.destination[0] - shooter.pos[0]
         total_dy = self.destination[1] - shooter.pos[1]
         self.distance = math.sqrt(total_dx**2 + total_dy**2)
@@ -62,8 +58,7 @@ class Shot:
     def get_current_position(self):
         return (
             self.shooter.pos[0] + self.dx * self.progress,
-            self.shooter.pos[1] + self.dy * self.progress
-        )
+            self.shooter.pos[1] + self.dy * self.progress)
 
 ALIVE_LEFT_DOTS = [Dot(x, y, (0, 0, 255)) for (x, y) in LEFT_DEFAULT_POSITIONS]
 ALIVE_RIGHT_DOTS = [Dot(x, y, (128, 128, 128)) for (x, y) in RIGHT_DEFAULT_POSITIONS]
@@ -80,9 +75,9 @@ while GAME_RUNNING:
         if event.type == pygame.QUIT:
             GAME_RUNNING = False
     for dot in ALIVE_LEFT_DOTS:
-        pygame.draw.circle(screen, dot.color, dot.pos, DOT_RADIUS)
+        pygame.draw.circle(screen, dot.color, dot.pos, SOLDIER_RADIUS)
     for dot in ALIVE_RIGHT_DOTS:
-        pygame.draw.circle(screen, dot.color, dot.pos, DOT_RADIUS)
+        pygame.draw.circle(screen, dot.color, dot.pos, SOLDIER_RADIUS)
     if ALIVE_LEFT_DOTS and ALIVE_RIGHT_DOTS:
         if not SHOT_IN_PROGRESS and (current_time - LAST_SHOT_TIME) >= ANIMATION_DELAY:
             shooter_side = NEXT_SHOOTER_SIDE
@@ -103,7 +98,16 @@ while GAME_RUNNING:
                     hit_chance = BASE_HIT_CHANCE * (right_count / left_count)
                 hit_chance = min(hit_chance, 1.0)
                 print(f'{left_count} {right_count}')
-                print(f'{hit_chance}')
+                #print(f'hit chance before distance calculation {hit_chance}')
+                distance = ((target.pos[0] - shooter.pos[0]) ** 2 + (target.pos[1] - shooter.pos[1]) ** 2) ** 0.5
+                #print(f'distance {distance}')
+                normalized_distance = (distance - 700) / (32.1658488546619 - 700)
+                #print(f'normalized distance {normalized_distance}')
+                accuracy_modifier = 1 - 0.2 * normalized_distance #Reduces up to 20% at the max distance
+                #print(f'accuracy modifier {accuracy_modifier}')
+                hit_chance = hit_chance * accuracy_modifier
+                hit_chance = min(hit_chance, 1.0)
+                print(f'final hit chance {hit_chance}')
                 hit = random.random() < hit_chance
                 CURRENT_SHOT = Shot(shooter, target, hit, MISS_OFFSET_VALUE)
                 SHOT_IN_PROGRESS = True
@@ -127,9 +131,9 @@ while GAME_RUNNING:
 left_alive = len(ALIVE_LEFT_DOTS) > 0
 right_alive = len(ALIVE_RIGHT_DOTS) > 0
 if left_alive and not right_alive:
-    print("North wins")
+    print("The North wins")
 elif right_alive and not left_alive:
-    print("South wins")
+    print("The South wins")
 elif not left_alive and not right_alive:
     print("It's a tie!")
 pygame.quit()
