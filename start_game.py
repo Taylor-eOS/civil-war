@@ -88,6 +88,8 @@ while GAME_RUNNING:
                 shooter = random.choice(ALIVE_RIGHT_DOTS)
                 targets = ALIVE_LEFT_DOTS
             if targets:
+                def get_euclid(dx, dy):
+                    return (dx ** 2 + dy ** 2) ** 0.5
                 target = random.choice(targets)
                 left_count = len(ALIVE_LEFT_DOTS)
                 right_count = len(ALIVE_RIGHT_DOTS)
@@ -96,18 +98,11 @@ while GAME_RUNNING:
                     hit_chance = BASE_HIT_CHANCE * (left_count / right_count)
                 else:
                     hit_chance = BASE_HIT_CHANCE * (right_count / left_count)
-                hit_chance = min(hit_chance, 1.0)
-                print(f'{left_count} {right_count}')
-                #print(f'hit chance before distance calculation {hit_chance}')
-                distance = ((target.pos[0] - shooter.pos[0]) ** 2 + (target.pos[1] - shooter.pos[1]) ** 2) ** 0.5
-                #print(f'distance {distance}')
-                normalized_distance = (distance - 700) / (32.1658488546619 - 700)
-                #print(f'normalized distance {normalized_distance}')
-                accuracy_modifier = 1 - 0.2 * normalized_distance #Reduces up to 20% at the max distance
-                #print(f'accuracy modifier {accuracy_modifier}')
+                distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
+                normalized_distance = (distance - 700) / (get_euclid(700, 450) - 700)
+                accuracy_modifier = 1 - 0.2 * normalized_distance
                 hit_chance = hit_chance * accuracy_modifier
                 hit_chance = min(hit_chance, 1.0)
-                print(f'final hit chance {hit_chance}')
                 hit = random.random() < hit_chance
                 CURRENT_SHOT = Shot(shooter, target, hit, MISS_OFFSET_VALUE)
                 SHOT_IN_PROGRESS = True
