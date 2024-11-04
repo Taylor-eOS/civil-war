@@ -1,6 +1,7 @@
 import random
 import math
 import pygame
+from utils import Dot, Shot
 
 pygame.init()
 screen = pygame.display.set_mode((800, 600))
@@ -9,57 +10,11 @@ clock = pygame.time.Clock()
 SOLDIER_RADIUS = 9
 SHOOT_SPEED = 9
 MISS_OFFSET_VALUE = 20
-SHOT_EXTENSION = 100
 SHOT_COOLDOWN = 1000
 BASE_HIT_CHANCE = 0.5
 ANIMATION_DELAY = 500
 LEFT_DEFAULT_POSITIONS = [(50, i * 50 + 50) for i in range(10)]
 RIGHT_DEFAULT_POSITIONS = [(750, i * 50 + 50) for i in range(10)]
-
-class Dot:
-    def __init__(self, x, y, color):
-        self.pos = (x, y)
-        self.color = color
-        self.last_shot = 0
-        self.alive = True
-
-class Shot:
-    def __init__(self, shooter, target, hit, miss_offset):
-        self.shooter = shooter
-        self.target = target
-        self.hit = hit
-        self.progress = 0
-        dx = target.pos[0] - shooter.pos[0]
-        dy = target.pos[1] - shooter.pos[1]
-        distance = math.sqrt(dx**2 + dy**2)
-        if distance != 0:
-            dir_x = dx / distance
-            dir_y = dy / distance
-        else:
-            dir_x, dir_y = 0, 0
-        if hit:
-            self.destination = target.pos
-        else:
-            perp_x = -dir_y
-            perp_y = dir_x
-            offset_direction = random.choice([-1, 1])
-            self.destination = (
-                target.pos[0] + dir_x * SHOT_EXTENSION + perp_x * miss_offset * offset_direction,
-                target.pos[1] + dir_y * SHOT_EXTENSION + perp_y * miss_offset * offset_direction)
-        total_dx = self.destination[0] - shooter.pos[0]
-        total_dy = self.destination[1] - shooter.pos[1]
-        self.distance = math.sqrt(total_dx**2 + total_dy**2)
-        if self.distance != 0:
-            self.dx = total_dx / self.distance
-            self.dy = total_dy / self.distance
-        else:
-            self.dx, self.dy = 0, 0
-
-    def get_current_position(self):
-        return (
-            self.shooter.pos[0] + self.dx * self.progress,
-            self.shooter.pos[1] + self.dy * self.progress)
-
 ALIVE_LEFT_DOTS = [Dot(x, y, (0, 0, 255)) for (x, y) in LEFT_DEFAULT_POSITIONS]
 ALIVE_RIGHT_DOTS = [Dot(x, y, (128, 128, 128)) for (x, y) in RIGHT_DEFAULT_POSITIONS]
 CURRENT_SHOT = None
@@ -67,6 +22,8 @@ LAST_SHOT_TIME = 0
 SHOT_IN_PROGRESS = False
 NEXT_SHOOTER_SIDE = random.choice(['left', 'right'])
 GAME_RUNNING = True
+MOVE_UNITS = 15
+MOVE_CHANCE = 0.7
 
 while GAME_RUNNING:
     current_time = pygame.time.get_ticks()
@@ -79,29 +36,40 @@ while GAME_RUNNING:
     for dot in ALIVE_RIGHT_DOTS:
         pygame.draw.circle(screen, dot.color, dot.pos, SOLDIER_RADIUS)
     if ALIVE_LEFT_DOTS and ALIVE_RIGHT_DOTS:
+        def get_euclid(dx, dy):
+            return (dx ** 2 + dy ** 2) ** 0.5
         if not SHOT_IN_PROGRESS and (current_time - LAST_SHOT_TIME) >= ANIMATION_DELAY:
             shooter_side = NEXT_SHOOTER_SIDE
             if shooter_side == 'left':
                 shooter = random.choice(ALIVE_LEFT_DOTS)
                 targets = ALIVE_RIGHT_DOTS
+                move_direction = 1
             else:
                 shooter = random.choice(ALIVE_RIGHT_DOTS)
                 targets = ALIVE_LEFT_DOTS
+                move_direction = -1
             if targets:
-                def get_euclid(dx, dy):
-                    return (dx ** 2 + dy ** 2) ** 0.5
+                if random.random() < MOVE_CHANCE:
+                    new_pos_x = shooter.pos[0] + MOVE_UNITS * move_direction
+                    shooter.pos = (new_pos_x, shooter.pos[1])
                 target = random.choice(targets)
                 left_count = len(ALIVE_LEFT_DOTS)
                 right_count = len(ALIVE_RIGHT_DOTS)
-                hit_chance = 0.5
+                hit_chance = BASE_HIT_CHANCE
                 if shooter_side == 'right':
                     hit_chance = BASE_HIT_CHANCE * (left_count / right_count)
                 else:
                     hit_chance = BASE_HIT_CHANCE * (right_count / left_count)
+                print(f'{left_count} {right_count}')
+                print(f'hit chance before distance {hit_chance}')
                 distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
+                print(f'distance {distance}')
                 normalized_distance = (distance - 700) / (get_euclid(700, 450) - 700)
-                accuracy_modifier = 1 - 0.2 * normalized_distance
+                print(f'normalized distance {normalized_distance}')
+                accuracy_modifier = 1 - 0.3 * normalized_distance
+                print(f'accuracy modifier {accuracy_modifier}')
                 hit_chance = hit_chance * accuracy_modifier
+                print(f'final hit chance {hit_chance}')
                 hit_chance = min(hit_chance, 1.0)
                 hit = random.random() < hit_chance
                 CURRENT_SHOT = Shot(shooter, target, hit, MISS_OFFSET_VALUE)
@@ -130,6 +98,6 @@ if left_alive and not right_alive:
 elif right_alive and not left_alive:
     print("The South wins")
 elif not left_alive and not right_alive:
-    print("It's a tie!")
+    print("It's a tie")
 pygame.quit()
 
