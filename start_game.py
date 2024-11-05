@@ -1,29 +1,33 @@
 import random
 import math
 import pygame
-from utils import Dot, Shot
+from utils import Dot, Shot, get_euclid, get_minimum_distance
 
 pygame.init()
-screen = pygame.display.set_mode((800, 600))
 pygame.display.set_caption("Civil War Game")
 clock = pygame.time.Clock()
-SOLDIER_RADIUS = 9
-SHOOT_SPEED = 9
-MISS_OFFSET_VALUE = 20
-SHOT_COOLDOWN = 1000
-BASE_HIT_CHANCE = 0.5
-ANIMATION_DELAY = 500
+screen = pygame.display.set_mode((800, 600))
 LEFT_DEFAULT_POSITIONS = [(50, i * 50 + 50) for i in range(10)]
 RIGHT_DEFAULT_POSITIONS = [(750, i * 50 + 50) for i in range(10)]
+MAX_DISTANCE = get_euclid(700, 450)
 ALIVE_LEFT_DOTS = [Dot(x, y, (0, 0, 255)) for (x, y) in LEFT_DEFAULT_POSITIONS]
 ALIVE_RIGHT_DOTS = [Dot(x, y, (128, 128, 128)) for (x, y) in RIGHT_DEFAULT_POSITIONS]
+SOLDIER_RADIUS = 9
+SHOOT_SPEED = 9
+BASE_HIT_CHANCE = 0.5
+DISTANCE_EFFECT = 0.4
+MISS_OFFSET_VALUE = 20
+SHOT_COOLDOWN = 1000
+ANIMATION_DELAY = 500
 CURRENT_SHOT = None
 LAST_SHOT_TIME = 0
 SHOT_IN_PROGRESS = False
 NEXT_SHOOTER_SIDE = random.choice(['left', 'right'])
 GAME_RUNNING = True
-MOVE_UNITS = 15
-MOVE_CHANCE = 0.7
+MOVE_UNITS = 11
+MOVE_CHANCE = 0.75
+STORMING_SIDE = random.choice([ALIVE_LEFT_DOTS, ALIVE_RIGHT_DOTS])
+FULL_ACCURACY = 300
 
 while GAME_RUNNING:
     current_time = pygame.time.get_ticks()
@@ -36,9 +40,12 @@ while GAME_RUNNING:
     for dot in ALIVE_RIGHT_DOTS:
         pygame.draw.circle(screen, dot.color, dot.pos, SOLDIER_RADIUS)
     if ALIVE_LEFT_DOTS and ALIVE_RIGHT_DOTS:
-        def get_euclid(dx, dy):
-            return (dx ** 2 + dy ** 2) ** 0.5
         if not SHOT_IN_PROGRESS and (current_time - LAST_SHOT_TIME) >= ANIMATION_DELAY:
+            for dot in STORMING_SIDE:
+                if random.random() < MOVE_CHANCE:
+                    move_direction = 1 if dot in ALIVE_LEFT_DOTS else -1
+                    new_pos_x = dot.pos[0] + MOVE_UNITS * move_direction
+                    dot.pos = (new_pos_x, dot.pos[1])
             shooter_side = NEXT_SHOOTER_SIDE
             if shooter_side == 'left':
                 shooter = random.choice(ALIVE_LEFT_DOTS)
@@ -48,29 +55,27 @@ while GAME_RUNNING:
                 shooter = random.choice(ALIVE_RIGHT_DOTS)
                 targets = ALIVE_LEFT_DOTS
                 move_direction = -1
+            #if random.random() < MOVE_CHANCE:
+            #    new_pos_x = shooter.pos[0] + MOVE_UNITS * move_direction
+            #    shooter.pos = (new_pos_x, shooter.pos[1])
             if targets:
-                if random.random() < MOVE_CHANCE:
-                    new_pos_x = shooter.pos[0] + MOVE_UNITS * move_direction
-                    shooter.pos = (new_pos_x, shooter.pos[1])
                 target = random.choice(targets)
                 left_count = len(ALIVE_LEFT_DOTS)
                 right_count = len(ALIVE_RIGHT_DOTS)
-                hit_chance = BASE_HIT_CHANCE
-                if shooter_side == 'right':
-                    hit_chance = BASE_HIT_CHANCE * (left_count / right_count)
-                else:
-                    hit_chance = BASE_HIT_CHANCE * (right_count / left_count)
                 print(f'{left_count} {right_count}')
-                print(f'hit chance before distance {hit_chance}')
+                soldier_proportion = right_count / left_count
+                if shooter_side == 'right':
+                    soldier_proportion = left_count / right_count
                 distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
-                print(f'distance {distance}')
-                normalized_distance = (distance - 700) / (get_euclid(700, 450) - 700)
-                print(f'normalized distance {normalized_distance}')
-                accuracy_modifier = 1 - 0.3 * normalized_distance
-                print(f'accuracy modifier {accuracy_modifier}')
-                hit_chance = hit_chance * accuracy_modifier
-                print(f'final hit chance {hit_chance}')
-                hit_chance = min(hit_chance, 1.0)
+                print(f'distance {distance:.0f}')
+                normalized_distance = (distance - FULL_ACCURACY) / (MAX_DISTANCE -FULL_ACCURACY)
+                print(f'normalized distance {normalized_distance:.2f}')
+                accuracy_modifier = 1 - normalized_distance * DISTANCE_EFFECT
+                print(f'accuracy modifier {accuracy_modifier:.2f}')
+                hit_chance = soldier_proportion * accuracy_modifier
+                print(f'hit chance {hit_chance:.2f}')
+                hit_chance = min(hit_chance * BASE_HIT_CHANCE, 1.0)
+                print(f'final hit chance {hit_chance:.2f}')
                 hit = random.random() < hit_chance
                 CURRENT_SHOT = Shot(shooter, target, hit, MISS_OFFSET_VALUE)
                 SHOT_IN_PROGRESS = True

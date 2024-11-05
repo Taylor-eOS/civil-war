@@ -46,3 +46,14 @@ class Shot:
             self.shooter.pos[0] + self.dx * self.progress,
             self.shooter.pos[1] + self.dy * self.progress)
 
+def get_euclid(dx, dy):
+    return (dx ** 2 + dy ** 2) ** 0.5
+
+def get_minimum_distance(shooter, opponents):
+    min_distance = float('inf')
+    for opponent in opponents:
+        distance = get_euclid(opponent.pos[0] - shooter.pos[0], opponent.pos[1] - shooter.pos[1])
+        if distance < min_distance:
+            min_distance = distance
+    return min_distance
+
