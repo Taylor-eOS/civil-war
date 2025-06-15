@@ -26,50 +26,53 @@ move_units = 10
 full_accuracy = 300
 
 class GameState:
-    def __init__(self, left_dots, right_dots):
-        self.left_dots = left_dots
-        self.right_dots = right_dots
-        self.all_dots = left_dots + right_dots
+    def __init__(self, left_dots=None, right_dots=None):
+        self.left_dots = left_dots if left_dots is not None else []
+        self.right_dots = right_dots if right_dots is not None else []
+        self.all_dots = self.left_dots + self.right_dots
 
     def to_graph_data(self, storming_side=None):
         if not self.all_dots:
             return None
-        #Node features: [normalized_x, normalized_y, side, storming, left_strength, right_strength, relative_x]
-        node_features = []
-        node_mapping = {}
+        # compute centroids and spreads for each side
+        def centroid_and_spread(dots):
+            if not dots: return (0.0, 0.0, 0.0)
+            xs = [d.pos[0] for d in dots]
+            ys = [d.pos[1] for d in dots]
+            cx, cy = sum(xs)/len(xs), sum(ys)/len(ys)
+            dists = [get_euclid(x-cx, y-cy) for x,y in zip(xs,ys)]
+            spread = sum(dists)/len(dists)
+            return (cx/800.0, cy/600.0, spread/max_distance)
+        lcx, lcy, lspread = centroid_and_spread(self.left_dots)
+        rcx, rcy, rspread = centroid_and_spread(self.right_dots)
+        between = get_euclid(lcx-rcx, lcy-rcy)
+        node_features=[]; node_mapping={}
         for i, dot in enumerate(self.all_dots):
             side = 1.0 if dot in self.left_dots else -1.0
-            #Determine if this soldier's side is storming
-            is_storming = 0.0
-            if storming_side is not None:
-                if dot in storming_side:
-                    is_storming = 1.0
-            #Relative position features for tactical awareness
-            relative_x = (dot.pos[0] - 400) / 400.0  #Distance from center
-            node_features.append([
-                dot.pos[0] / 800.0,  #normalized x
-                dot.pos[1] / 600.0,  #normalized y
-                side,                #which army (-1 or 1)
-                is_storming,         #whether this side is advancing
-                len(self.left_dots) / 10.0,   #left army strength
-                len(self.right_dots) / 10.0,  #right army strength
-                relative_x])           #tactical position relative to center
+            is_storming = 1.0 if (storming_side and dot in storming_side) else 0.0
+            rx = (dot.pos[0] - 400)/400.0
+            base = [
+                dot.pos[0]/800.0,
+                dot.pos[1]/600.0,
+                side,
+                is_storming,
+                len(self.left_dots)/10.0,
+                len(self.right_dots)/10.0,
+                rx]
+            # append centroids & spreads
+            extras = [lcx, lcy, lspread, rcx, rcy, rspread, between/max_distance]
+            node_features.append(base + extras)
             node_mapping[dot] = i
-        #Edge features: distance, relative position, same_side
-        edge_indices = []
-        edge_features = []
-        for i, dot1 in enumerate(self.all_dots):
-            for j, dot2 in enumerate(self.all_dots):
-                if i != j:
-                    distance = get_euclid(dot2.pos[0] - dot1.pos[0], dot2.pos[1] - dot1.pos[1])
-                    same_side = 1.0 if ((dot1 in self.left_dots and dot2 in self.left_dots) or 
-                                       (dot1 in self.right_dots and dot2 in self.right_dots)) else 0.0
-                    edge_indices.append([i, j])
-                    edge_features.append([
-                        distance / max_distance,  #normalized distance
-                        (dot2.pos[0] - dot1.pos[0]) / 800.0,  #relative x
-                        (dot2.pos[1] - dot1.pos[1]) / 600.0,  #relative y
-                        same_side])
+        edge_indices=[]; edge_features=[]
+        for i, d1 in enumerate(self.all_dots):
+            for j, d2 in enumerate(self.all_dots):
+                if i==j: continue
+                dx, dy = d2.pos[0]-d1.pos[0], d2.pos[1]-d1.pos[1]
+                dist = get_euclid(dx, dy)
+                same = 1.0 if ((d1 in self.left_dots and d2 in self.left_dots)
+                               or (d1 in self.right_dots and d2 in self.right_dots)) else 0.0
+                edge_indices.append([i, j])
+                edge_features.append([dist/max_distance, dx/800.0, dy/600.0, same])
         return {
             'node_features': torch.tensor(node_features, dtype=torch.float32),
             'edge_indices': torch.tensor(edge_indices, dtype=torch.long).t(),
@@ -203,27 +206,22 @@ class GNNCivilWarGame:
         else:
             return None
 
-    def calculate_loss(self,winner):
-        total_loss=torch.tensor(0.0)
+    def calculate_loss(self, winner):
+        total_loss = torch.tensor(0.0, device=next(self.model.parameters()).device)
         for turn in self.game_history:
-            dec,hit,left_count,right_count,side=turn['decisions'],turn['hit'],turn['left_count'],turn['right_count'],turn['shooter_side']
-            storm=turn['storming_side_name']
-            if winner=='tie':outc=0.0
-            elif winner==side:outc=1.0
-            else:outc=-1.0
-            hit_r=0.3 if hit else -0.1
-            role_r=0.1 if storm==side and hit else 0.0
-            if storm!=side:role_r=0.2 if hit else -0.2
-            adv=outc+hit_r+role_r
-            if 'move_probs' in dec:
-                mp=dec['move_probs']
-                tgt=0.7 if storm==side and adv>0 else 0.4 if storm==side else 0.2 if adv>0 else 0.1
-                total_loss+=0.5*F.mse_loss(mp,torch.full_like(mp,tgt))
+            dec = turn['decisions']
+            side = turn['shooter_side']
+            if winner == 'tie':
+                outcome = 0.0
+            elif winner == side:
+                outcome = 1.0
+            else:
+                outcome = -1.0
             if 'shooter_logprob' in dec:
-                total_loss+=-dec['shooter_logprob']*adv*0.1
+                total_loss += -dec['shooter_logprob'] * outcome
             if 'target_logprob' in dec:
-                total_loss+=-dec['target_logprob']*adv*0.2
-        return total_loss/ max(len(self.game_history),1)
+                total_loss += -dec['target_logprob'] * outcome * 0.01
+        return total_loss / max(len(self.game_history), 1)
 
     def train_step(self, winner):
         loss = self.calculate_loss(winner)

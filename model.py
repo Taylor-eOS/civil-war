@@ -33,15 +33,14 @@ class GraphConvLayer(nn.Module):
         return self.update_mlp(updated)
 
 class TacticalGNN(nn.Module):
-    def __init__(self, node_dim=7, edge_dim=4, hidden_dim=128, num_layers=4):  #Updated node_dim to 7
+    def __init__(self, node_dim=14, edge_dim=4, hidden_dim=128, num_layers=4):  # updated node_dim to 14
         super().__init__()
         self.num_layers = num_layers
         self.hidden_dim = hidden_dim
-        #Graph convolution layers with residual connections
         self.conv_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()
         current_dim = node_dim
-        for i in range(num_layers):
+        for _ in range(num_layers):
             out_dim = hidden_dim
             self.conv_layers.append(GraphConvLayer(current_dim, edge_dim, hidden_dim, out_dim))
             self.layer_norms.append(nn.LayerNorm(out_dim))
