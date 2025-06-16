@@ -9,7 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
-from model import GraphConvLayer, TacticalGNN
+from model import TacticalGNN
 from utils import Dot, Shot, get_euclid, get_minimum_distance
 
 left_default_positions = [(50, i * 50 + 50) for i in range(10)]
@@ -21,7 +21,7 @@ base_hit_chance = 0.5
 distance_effect = 0.4
 miss_offset_value = 20
 shot_cooldown = 1000
-animation_delay = 500
+animation_delay = 420
 move_units = 10
 full_accuracy = 300
 
@@ -34,7 +34,7 @@ class GameState:
     def to_graph_data(self, storming_side=None):
         if not self.all_dots:
             return None
-        # compute centroids and spreads for each side
+        #compute centroids and spreads for each side
         def centroid_and_spread(dots):
             if not dots: return (0.0, 0.0, 0.0)
             xs = [d.pos[0] for d in dots]
@@ -59,7 +59,7 @@ class GameState:
                 len(self.left_dots)/10.0,
                 len(self.right_dots)/10.0,
                 rx]
-            # append centroids & spreads
+            #append centroids & spreads
             extras = [lcx, lcy, lspread, rcx, rcy, rspread, between/max_distance]
             node_features.append(base + extras)
             node_mapping[dot] = i
@@ -115,41 +115,44 @@ class GNNCivilWarGame:
         with torch.no_grad() if not self.training_mode else torch.enable_grad():
             decisions = self.model(graph_data)
         move_decisions = {}
-        for i,dot in enumerate(game_state.all_dots):
-            move_decisions[dot] = (decisions['move_probs'][i].item()>0.5) if dot in self.storming_side else False
-        shooter_side_dots = self.alive_left_dots if self.next_shooter_side=='left' else self.alive_right_dots
+        for i, dot in enumerate(game_state.all_dots):
+            if dot in self.storming_side:
+                move_decisions[dot] = torch.argmax(decisions['move_probs'][i]).item()
+            else:
+                move_decisions[dot] = None
+        shooter_side_dots = self.alive_left_dots if self.next_shooter_side == 'left' else self.alive_right_dots
         if not shooter_side_dots:
-            return move_decisions,None,None,decisions
-        shooter_indices = [i for i,d in enumerate(game_state.all_dots) if d in shooter_side_dots]
+            return move_decisions, None, None, decisions
+        shooter_indices = [i for i, d in enumerate(game_state.all_dots) if d in shooter_side_dots]
         shooter_logits = decisions['shooter_logits'][shooter_indices]
         shooter_dist = torch.distributions.Categorical(logits=shooter_logits)
         rel_idx = shooter_dist.sample().item()
         shooter = shooter_side_dots[rel_idx]
         shooter_logprob = shooter_dist.log_prob(torch.tensor(rel_idx))
-        target_side = self.alive_right_dots if self.next_shooter_side=='left' else self.alive_left_dots
+        target_side = self.alive_right_dots if self.next_shooter_side == 'left' else self.alive_left_dots
         if not target_side:
-            return move_decisions,shooter,None,dict(decisions,shooter_logprob=shooter_logprob)
+            return move_decisions, shooter, None, {**decisions, 'shooter_logprob': shooter_logprob}
         shooter_node_idx = game_state.all_dots.index(shooter)
-        target_scores, candidates = [],[]
-        score_idx=0
+        target_scores, candidates = [], []
+        score_idx = 0
         for i in range(len(game_state.all_dots)):
             for j in range(len(game_state.all_dots)):
-                if i!=j:
-                    if i==shooter_node_idx and game_state.all_dots[j] in target_side:
+                if i != j:
+                    if i == shooter_node_idx and game_state.all_dots[j] in target_side:
                         target_scores.append(decisions['target_scores'][score_idx])
                         candidates.append(game_state.all_dots[j])
-                    score_idx+=1
+                    score_idx += 1
         if target_scores:
-            target_logits = torch.cat(target_scores)
-            target_dist = torch.distributions.Categorical(logits=target_logits)
+            logits = torch.stack(target_scores)
+            target_dist = torch.distributions.Categorical(logits=logits)
             targ_rel = target_dist.sample().item()
             target = candidates[targ_rel]
             target_logprob = target_dist.log_prob(torch.tensor(targ_rel))
         else:
             target = random.choice(target_side)
             target_logprob = torch.tensor(0.0)
-        decisions.update(shooter_logprob=shooter_logprob,target_logprob=target_logprob)
-        return move_decisions,shooter,target,decisions
+        decisions.update(shooter_logprob=shooter_logprob, target_logprob=target_logprob)
+        return move_decisions, shooter, target, decisions
 
     def execute_turn(self):
         if not self.alive_left_dots or not self.alive_right_dots:
@@ -158,41 +161,55 @@ class GNNCivilWarGame:
         move_decisions, shooter, target, raw_decisions = self.make_decisions(game_state)
         if move_decisions is None:
             return False
-        #Execute movement
-        for dot, should_move in move_decisions.items():
-            if should_move and dot in self.storming_side:
-                move_direction = 1 if dot in self.alive_left_dots else -1
-                new_pos_x = dot.pos[0] + move_units * move_direction
-                dot.pos = (new_pos_x, dot.pos[1])
-        #Execute shooting
+        self.apply_movement(move_decisions)
         if shooter and target:
-            left_count = len(self.alive_left_dots)
-            right_count = len(self.alive_right_dots)
-            soldier_proportion = right_count / left_count if self.next_shooter_side == 'left' else left_count / right_count
-            distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
-            normalized_distance = (distance - full_accuracy) / (max_distance - full_accuracy)
-            accuracy_modifier = 1 - normalized_distance * distance_effect
-            hit_chance = min(soldier_proportion * accuracy_modifier * base_hit_chance, 1.0)
-            hit = random.random() < hit_chance
-            if hit:
-                if target in self.alive_right_dots:
-                    self.alive_right_dots.remove(target)
-                elif target in self.alive_left_dots:
-                    self.alive_left_dots.remove(target)
-            #Store turn data for training including storming side info
-            storming_side_name = 'left' if self.storming_side == self.alive_left_dots else 'right'
-            turn_data = {
-                'game_state': game_state,
-                'decisions': raw_decisions,
-                'shooter_side': self.next_shooter_side,
-                'hit': hit,
-                'left_count': left_count,
-                'right_count': right_count,
-                'storming_side_name': storming_side_name}
-            self.game_history.append(turn_data)
-            #Switch sides
-            self.next_shooter_side = 'right' if self.next_shooter_side == 'left' else 'left'
+            self.resolve_shot(shooter, target, game_state, raw_decisions)
         return True
+
+    def apply_movement(self, move_decisions):
+        import math
+        diag_step = move_units / math.sqrt(2)
+        for dot, move_code in move_decisions.items():
+            if dot in self.storming_side and move_code is not None:
+                direction = 1 if dot in self.alive_left_dots else -1
+                dx = dy = 0.0
+                if move_code == 1:
+                    dx = move_units * direction
+                elif move_code == 2:
+                    dx = diag_step * direction
+                    dy = diag_step
+                elif move_code == 3:
+                    dx = diag_step * direction
+                    dy = -diag_step
+                x, y = dot.pos
+                new_x = max(min(x + dx, 800), 0)
+                new_y = max(min(y + dy, 600), 0)
+                dot.pos = (new_x, new_y)
+
+    def resolve_shot(self, shooter, target, game_state, raw_decisions):
+        left_count = len(self.alive_left_dots)
+        right_count = len(self.alive_right_dots)
+        soldier_proportion = (right_count / left_count) if self.next_shooter_side == 'left' else (left_count / right_count)
+        distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
+        normalized_distance = (distance - full_accuracy) / (max_distance - full_accuracy)
+        accuracy_modifier = 1 - normalized_distance * distance_effect
+        hit_chance = min(soldier_proportion * accuracy_modifier * base_hit_chance, 1.0)
+        hit = random.random() < hit_chance
+        if hit:
+            if target in self.alive_right_dots:
+                self.alive_right_dots.remove(target)
+            elif target in self.alive_left_dots:
+                self.alive_left_dots.remove(target)
+        storming_side_name = 'left' if self.storming_side is self.alive_left_dots else 'right'
+        self.game_history.append({
+            'game_state': game_state,
+            'decisions': raw_decisions,
+            'shooter_side': self.next_shooter_side,
+            'hit': hit,
+            'left_count': left_count,
+            'right_count': right_count,
+            'storming_side_name': storming_side_name})
+        self.next_shooter_side = 'right' if self.next_shooter_side == 'left' else 'left'
 
     def get_winner(self):
         left_alive = len(self.alive_left_dots) > 0
@@ -271,10 +288,24 @@ def train_model(num_episodes=1000, model_save_path='model.pth'):
             print(f"Average loss: {np.mean(losses[-200:]):.4f}")
             print(f"Learning rate: {game.optimizer.param_groups[0]['lr']:.6f}")
             print()
-    #Save model
     torch.save(game.model.state_dict(), model_save_path)
     print(f"Model saved to {model_save_path}")
     return win_stats, losses
+
+def apply_move(dot, move_code, move_units, left_team, right_team):
+    direction = 1 if dot in left_team else -1
+    diag = move_units / math.sqrt(2)
+    dx = dy = 0.0
+    if move_code == 1:
+        dx = move_units * direction
+    elif move_code == 2:
+        dx = diag * direction
+        dy = diag
+    elif move_code == 3:
+        dx = diag * direction
+        dy = -diag
+    x, y = dot.pos
+    dot.pos = (x + dx, y + dy)
 
 def play_visual_game(model_path='model.pth'):
     pygame.init()
@@ -292,35 +323,26 @@ def play_visual_game(model_path='model.pth'):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 game_running = False
-            elif event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_r:  #Reset game
-                    game.reset_game()
-                    current_shot = None
-                    shot_in_progress = False
-        #Draw soldiers
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+                game.reset_game()
+                current_shot = None
+                shot_in_progress = False
         for dot in game.alive_left_dots:
             pygame.draw.circle(screen, dot.color, dot.pos, soldier_radius)
         for dot in game.alive_right_dots:
             pygame.draw.circle(screen, dot.color, dot.pos, soldier_radius)
-        #Game logic
         if game.alive_left_dots and game.alive_right_dots:
             if not shot_in_progress and (current_time - last_shot_time) >= animation_delay:
                 game_state = game.get_game_state()
                 move_decisions, shooter, target, _ = game.make_decisions(game_state)
-                #Execute movement
                 if move_decisions:
-                    for dot, should_move in move_decisions.items():
-                        if should_move and dot in game.storming_side:
-                            move_direction = 1 if dot in game.alive_left_dots else -1
-                            new_pos_x = dot.pos[0] + move_units * move_direction
-                            dot.pos = (new_pos_x, dot.pos[1])
-                #Execute shooting
+                    for dot, move_code in move_decisions.items():
+                        if dot in game.storming_side and move_code is not None:
+                            apply_move(dot, move_code, move_units, game.alive_left_dots, game.alive_right_dots)
                 if shooter and target:
-                    left_count = len(game.alive_left_dots)
-                    right_count = len(game.alive_right_dots)
-                    soldier_proportion = right_count / left_count if game.next_shooter_side == 'left' else left_count / right_count
                     distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
                     normalized_distance = (distance - full_accuracy) / (max_distance - full_accuracy)
+                    soldier_proportion = (len(game.alive_right_dots) / len(game.alive_left_dots) if game.next_shooter_side == 'left' else len(game.alive_left_dots) / len(game.alive_right_dots))
                     accuracy_modifier = 1 - normalized_distance * distance_effect
                     hit_chance = min(soldier_proportion * accuracy_modifier * base_hit_chance, 1.0)
                     hit = random.random() < hit_chance
@@ -328,10 +350,9 @@ def play_visual_game(model_path='model.pth'):
                     shot_in_progress = True
                     last_shot_time = current_time
                     game.next_shooter_side = 'right' if game.next_shooter_side == 'left' else 'left'
-        #Handle shot animation
         if shot_in_progress and current_shot:
-            current_x, current_y = current_shot.get_current_position()
-            pygame.draw.circle(screen, (0, 0, 0), (int(current_x), int(current_y)), 3)
+            cx, cy = current_shot.get_current_position()
+            pygame.draw.circle(screen, (0, 0, 0), (int(cx), int(cy)), 3)
             current_shot.progress += shoot_speed
             if current_shot.progress >= current_shot.distance:
                 if current_shot.hit:
@@ -343,13 +364,12 @@ def play_visual_game(model_path='model.pth'):
                 shot_in_progress = False
         pygame.display.flip()
         clock.tick(60)
-    #Display final result
     winner = game.get_winner()
     if winner == 'left':
         print("The North wins")
     elif winner == 'right':
         print("The South wins")
-    elif winner == 'tie':
+    else:
         print("It's a tie")
     pygame.quit()
 
