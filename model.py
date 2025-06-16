@@ -4,97 +4,83 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 class GraphConvLayer(nn.Module):
-    def __init__(self, node_dim, edge_dim, hidden_dim, out_dim):
+    def __init__(self, node_dim, edge_dim, hidden_dim):
         super().__init__()
-        self.node_transform = nn.Linear(node_dim, hidden_dim)
-        self.edge_transform = nn.Linear(edge_dim, hidden_dim)
-        self.message_mlp = nn.Sequential(
+        self.node_lin = nn.Linear(node_dim, hidden_dim)
+        self.edge_lin = nn.Linear(edge_dim, hidden_dim)
+        self.msg_mlp = nn.Sequential(
             nn.Linear(hidden_dim * 2, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, out_dim))
+            nn.Linear(hidden_dim, hidden_dim))
         self.update_mlp = nn.Sequential(
-            nn.Linear(node_dim + out_dim, hidden_dim),
+            nn.Linear(node_dim + hidden_dim, hidden_dim),
             nn.ReLU(),
-            nn.Linear(hidden_dim, out_dim))
+            nn.Linear(hidden_dim, hidden_dim))
 
-    def forward(self, node_features, edge_indices, edge_features):
-        node_emb = self.node_transform(node_features)
-        edge_emb = self.edge_transform(edge_features)
-        src, dst = edge_indices
-        messages = torch.cat([node_emb[src], edge_emb], dim=-1)
-        messages = self.message_mlp(messages)
-        aggregated = torch.zeros_like(node_emb[:, :messages.size(-1)])
-        aggregated.index_add_(0, dst, messages)
-        updated = torch.cat([node_features, aggregated], dim=-1)
-        return self.update_mlp(updated)
+    def forward(self, node_feats, edge_idx, edge_feats):
+        h = self.node_lin(node_feats)
+        e = self.edge_lin(edge_feats)
+        src, dst = edge_idx
+        m = self.msg_mlp(torch.cat([h[src], e], dim=-1))
+        agg = torch.zeros_like(h)
+        agg.index_add_(0, dst, m)
+        up = torch.cat([node_feats, agg], dim=-1)
+        return self.update_mlp(up)
 
 class TacticalGNN(nn.Module):
-    def __init__(self, node_dim=14, edge_dim=4, hidden_dim=128, num_layers=4):
+    def __init__(self, node_dim, edge_dim):
         super().__init__()
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
+        self.hidden_dim = 256
+        self.num_layers = 6
         self.conv_layers = nn.ModuleList()
         self.layer_norms = nn.ModuleList()
-        current_dim = node_dim
-        for _ in range(num_layers):
-            out_dim = hidden_dim
-            self.conv_layers.append(GraphConvLayer(current_dim, edge_dim, hidden_dim, out_dim))
-            self.layer_norms.append(nn.LayerNorm(out_dim))
-            current_dim = out_dim
+        dims = [node_dim] + [self.hidden_dim] * self.num_layers
+        for i in range(self.num_layers):
+            self.conv_layers.append(GraphConvLayer(dims[i], edge_dim, self.hidden_dim))
+            self.layer_norms.append(nn.LayerNorm(self.hidden_dim))
+        self.global_lin = nn.Linear(self.hidden_dim, self.hidden_dim)
         self.move_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 4))
+            nn.Dropout(0.2),
+            nn.Linear(self.hidden_dim, 4))
         self.shooter_head = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
+            nn.Linear(self.hidden_dim * 2, self.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1))
+            nn.Dropout(0.2),
+            nn.Linear(self.hidden_dim, 1))
         self.target_head = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Linear(self.hidden_dim * 3, self.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1))
-
-    def _compute_target(self, x):
-        scores = []
-        for i in range(x.size(0)):
-            for j in range(x.size(0)):
-                if i == j:
-                    continue
-                combined = torch.cat([x[i], x[j]], dim=-1)
-                scores.append(self.target_head(combined).squeeze(-1))
-        if scores:
-            return torch.stack(scores)
-        return torch.tensor([], device=x.device)
+            nn.Dropout(0.2),
+            nn.Linear(self.hidden_dim, 1))
 
     def forward(self, graph_data):
-        node_features = graph_data['node_features']
-        edge_indices = graph_data['edge_indices']
-        edge_features = graph_data['edge_features']
-        x = node_features
+        x = graph_data['node_features']
+        ei = graph_data['edge_indices']
+        ef = graph_data['edge_features']
         for conv, norm in zip(self.conv_layers, self.layer_norms):
-            residual = x if x.size(-1) == self.hidden_dim else None
-            x = conv(x, edge_indices, edge_features)
+            res = x
+            x = conv(x, ei, ef)
             x = norm(x)
-            if residual is not None:
-                x = x + residual
-            x = F.relu(x)
-        move_logits = self.move_head(x)                  # [N,4]
-        move_probs = F.softmax(move_logits, dim=-1)
-        shooter_logits = self.shooter_head(x).squeeze(-1)
-        target_scores = self._compute_target(x)
+            if res.size(-1) == x.size(-1):
+                x = F.relu(x + res)
+            else:
+                x = F.relu(x)
+        global_ctx = self.global_lin(x.mean(0, keepdim=True)).expand(x.size(0), -1)
+        mv = self.move_head(torch.cat([x, global_ctx], dim=-1))
+        sv = self.shooter_head(torch.cat([x, global_ctx], dim=-1)).squeeze(-1)
+        ts = []
+        n = x.size(0)
+        for i in range(n):
+            for j in range(n):
+                if i != j:
+                    ts.append(self.target_head(torch.cat([x[i], x[j], global_ctx[i]], dim=-1)).squeeze(-1))
+        ts = torch.stack(ts) if ts else torch.tensor([], device=x.device)
         return {
-            'move_logits': move_logits,
-            'move_probs': torch.clamp(move_probs, 1e-3, 1-1e-3),
-            'shooter_logits': torch.clamp(shooter_logits, -10, 10),
-            'target_scores': torch.clamp(target_scores, -10, 10),
+            'move_logits': mv,
+            'move_probs': F.softmax(mv, dim=-1),
+            'shooter_logits': torch.clamp(sv, -10, 10),
+            'target_scores': torch.clamp(ts, -10, 10),
             'node_embeddings': x}
 

@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
 from model import TacticalGNN
-from utils import Dot, Shot, get_euclid, get_minimum_distance
+from utils import Dot, Shot, get_euclid
 
 left_default_positions = [(50, i * 50 + 50) for i in range(10)]
 right_default_positions = [(750, i * 50 + 50) for i in range(10)]
@@ -20,7 +20,6 @@ shoot_speed = 9
 base_hit_chance = 0.5
 distance_effect = 0.4
 miss_offset_value = 20
-shot_cooldown = 1000
 animation_delay = 420
 move_units = 10
 full_accuracy = 300
@@ -34,68 +33,74 @@ class GameState:
     def to_graph_data(self, storming_side=None):
         if not self.all_dots:
             return None
-        #compute centroids and spreads for each side
-        def centroid_and_spread(dots):
-            if not dots: return (0.0, 0.0, 0.0)
-            xs = [d.pos[0] for d in dots]
-            ys = [d.pos[1] for d in dots]
-            cx, cy = sum(xs)/len(xs), sum(ys)/len(ys)
-            dists = [get_euclid(x-cx, y-cy) for x,y in zip(xs,ys)]
-            spread = sum(dists)/len(dists)
-            return (cx/800.0, cy/600.0, spread/max_distance)
-        lcx, lcy, lspread = centroid_and_spread(self.left_dots)
-        rcx, rcy, rspread = centroid_and_spread(self.right_dots)
-        between = get_euclid(lcx-rcx, lcy-rcy)
-        node_features=[]; node_mapping={}
+        MAX_UNITS = 20
+        lcx, lcy, lspread = self._centroid_and_spread(self.left_dots)
+        rcx, rcy, rspread = self._centroid_and_spread(self.right_dots)
+        between = get_euclid(lcx - rcx, lcy - rcy)
+        all_positions = []
+        for dot in (self.left_dots + self.right_dots)[:MAX_UNITS]:
+            all_positions.extend([dot.pos[0] / 800.0, dot.pos[1] / 600.0])
+        while len(all_positions) < MAX_UNITS * 2:
+            all_positions.append(0.0)
+        node_features = []
+        node_mapping = {}
         for i, dot in enumerate(self.all_dots):
             side = 1.0 if dot in self.left_dots else -1.0
             is_storming = 1.0 if (storming_side and dot in storming_side) else 0.0
-            rx = (dot.pos[0] - 400)/400.0
-            base = [
-                dot.pos[0]/800.0,
-                dot.pos[1]/600.0,
-                side,
-                is_storming,
-                len(self.left_dots)/10.0,
-                len(self.right_dots)/10.0,
-                rx]
-            #append centroids & spreads
-            extras = [lcx, lcy, lspread, rcx, rcy, rspread, between/max_distance]
-            node_features.append(base + extras)
+            rx = (dot.pos[0] - 400) / 400.0
+            ally_dots = self.left_dots if dot in self.left_dots else self.right_dots
+            enemy_dots = self.right_dots if dot in self.left_dots else self.left_dots
+            dists_ally = [get_euclid(dot.pos[0] - d.pos[0], dot.pos[1] - d.pos[1]) for d in ally_dots if d is not dot]
+            dists_enemy = [get_euclid(dot.pos[0] - d.pos[0], dot.pos[1] - d.pos[1]) for d in enemy_dots]
+            min_ally = min(dists_ally) / max_distance if dists_ally else 0.0
+            avg_ally = (sum(dists_ally) / len(dists_ally)) / max_distance if dists_ally else 0.0
+            min_enemy = min(dists_enemy) / max_distance if dists_enemy else 0.0
+            avg_enemy = (sum(dists_enemy) / len(dists_enemy)) / max_distance if dists_enemy else 0.0
+            base = [dot.pos[0] / 800.0, dot.pos[1] / 600.0, side, is_storming, len(self.left_dots) / 10.0, len(self.right_dots) / 10.0, rx]
+            extras = [ lcx, lcy, lspread, rcx, rcy, rspread, between / max_distance]
+            node_features.append(base + extras + [min_ally, avg_ally, min_enemy, avg_enemy] + all_positions)
             node_mapping[dot] = i
-        edge_indices=[]; edge_features=[]
+        edge_indices = []
+        edge_features = []
         for i, d1 in enumerate(self.all_dots):
             for j, d2 in enumerate(self.all_dots):
-                if i==j: continue
-                dx, dy = d2.pos[0]-d1.pos[0], d2.pos[1]-d1.pos[1]
+                if i == j:
+                    continue
+                dx = d2.pos[0] - d1.pos[0]
+                dy = d2.pos[1] - d1.pos[1]
                 dist = get_euclid(dx, dy)
-                same = 1.0 if ((d1 in self.left_dots and d2 in self.left_dots)
-                               or (d1 in self.right_dots and d2 in self.right_dots)) else 0.0
+                same = 1.0 if (
+                    (d1 in self.left_dots and d2 in self.left_dots) or
+                    (d1 in self.right_dots and d2 in self.right_dots)) else 0.0
                 edge_indices.append([i, j])
-                edge_features.append([dist/max_distance, dx/800.0, dy/600.0, same])
+                edge_features.append([dist / max_distance, dx / 800.0, dy / 600.0, same])
         return {
             'node_features': torch.tensor(node_features, dtype=torch.float32),
             'edge_indices': torch.tensor(edge_indices, dtype=torch.long).t(),
             'edge_features': torch.tensor(edge_features, dtype=torch.float32),
             'node_mapping': node_mapping}
 
+    def _centroid_and_spread(self, dots):
+        if not dots: return (0.0, 0.0, 0.0)
+        xs=[d.pos[0] for d in dots]; ys=[d.pos[1] for d in dots]
+        cx, cy = sum(xs) / len(xs), sum(ys) / len(ys)
+        dists = [get_euclid(x - cx, y - cy) for x, y in zip(xs, ys)]
+        return (cx / 800.0, cy / 600.0, sum(dists) / len(dists) / max_distance)
+
 class GNNCivilWarGame:
     def __init__(self, model_path=None, training_mode=False):
-        self.model = TacticalGNN()
+        node_dim = 58
+        edge_dim = 4
+        self.model = TacticalGNN(node_dim, edge_dim)
         self.optimizer = optim.Adam(self.model.parameters(), lr=0.001)
         self.training_mode = training_mode
-        if model_path and torch.cuda.is_available():
+        self.view_rect = (0, 0, 800, 600)
+        if model_path:
+            map_loc = None if torch.cuda.is_available() else 'cpu'
             try:
-                self.model.load_state_dict(torch.load(model_path))
-                print(f"Loaded model from {model_path}")
+                self.model.load_state_dict(torch.load(model_path, map_location=map_loc))
             except:
-                print(f"Could not load model from {model_path}, using random initialization")
-        elif model_path:
-            try:
-                self.model.load_state_dict(torch.load(model_path, map_location='cpu'))
-                print(f"Loaded model from {model_path}")
-            except:
-                print(f"Could not load model from {model_path}, using random initialization")
+                pass
         self.reset_game()
 
     def reset_game(self):
@@ -182,8 +187,15 @@ class GNNCivilWarGame:
                     dx = diag_step * direction
                     dy = -diag_step
                 x, y = dot.pos
-                new_x = max(min(x + dx, 800), 0)
-                new_y = max(min(y + dy, 600), 0)
+                new_x = x + dx
+                new_y = y + dy
+                if hasattr(self, 'view_rect'):
+                    x0, y0, x1, y1 = self.view_rect
+                    new_x = max(min(new_x, x1 - 2), x0 + 2)
+                    new_y = max(min(new_y, y1 - 2), y0 + 2)
+                else:
+                    new_x = max(min(new_x, 796), 4)
+                    new_y = max(min(new_y, 596), 4)
                 dot.pos = (new_x, new_y)
 
     def resolve_shot(self, shooter, target, game_state, raw_decisions):
@@ -259,7 +271,7 @@ def train_model(num_episodes=1000, model_save_path='model.pth'):
         game.reset_game()
         #Play out the game with max turns limit
         turn_count = 0
-        max_turns = 100  #Prevent infinite games
+        max_turns = 100
         while turn_count < max_turns:
             if not game.execute_turn():
                 break
@@ -274,7 +286,6 @@ def train_model(num_episodes=1000, model_save_path='model.pth'):
         #Train on this episode
         loss = game.train_step(winner)
         losses.append(loss)
-        #Update learning rate
         scheduler.step()
         if (episode + 1) % 100 == 0:
             left_wins = win_stats['left']
@@ -292,7 +303,7 @@ def train_model(num_episodes=1000, model_save_path='model.pth'):
     print(f"Model saved to {model_save_path}")
     return win_stats, losses
 
-def apply_move(dot, move_code, move_units, left_team, right_team):
+def apply_move(dot, move_code, move_units, left_team, right_team, view_rect=None):
     direction = 1 if dot in left_team else -1
     diag = move_units / math.sqrt(2)
     dx = dy = 0.0
@@ -305,7 +316,16 @@ def apply_move(dot, move_code, move_units, left_team, right_team):
         dx = diag * direction
         dy = -diag
     x, y = dot.pos
-    dot.pos = (x + dx, y + dy)
+    new_x = x + dx
+    new_y = y + dy
+    if view_rect is not None:
+        x0, y0, x1, y1 = view_rect
+        new_x = max(min(new_x, x1 - 2), x0 + 2)
+        new_y = max(min(new_y, y1 - 2), y0 + 2)
+    else:
+        new_x = max(min(new_x, 796), 4)
+        new_y = max(min(new_y, 596), 4)
+    dot.pos = (new_x, new_y)
 
 def play_visual_game(model_path='model.pth'):
     pygame.init()
@@ -338,7 +358,7 @@ def play_visual_game(model_path='model.pth'):
                 if move_decisions:
                     for dot, move_code in move_decisions.items():
                         if dot in game.storming_side and move_code is not None:
-                            apply_move(dot, move_code, move_units, game.alive_left_dots, game.alive_right_dots)
+                            apply_move(dot, move_code, move_units, game.alive_left_dots, game.alive_right_dots, game.view_rect)
                 if shooter and target:
                     distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
                     normalized_distance = (distance - full_accuracy) / (max_distance - full_accuracy)
