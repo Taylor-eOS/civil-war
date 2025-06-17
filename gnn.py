@@ -21,7 +21,7 @@ base_hit_chance = 0.5
 distance_effect = 0.4
 miss_offset_value = 20
 animation_delay = 420
-move_units = 10
+move_units = 8
 full_accuracy = 300
 
 class GameState:
@@ -118,46 +118,46 @@ class GNNCivilWarGame:
         if graph_data is None:
             return None, None, None, None
         with torch.no_grad() if not self.training_mode else torch.enable_grad():
-            decisions = self.model(graph_data)
-        move_decisions = {}
-        for i, dot in enumerate(game_state.all_dots):
+            out = self.model(graph_data)
+        move_decisions, move_logprobs = {},{}
+        for i,dot in enumerate(game_state.all_dots):
             if dot in self.storming_side:
-                move_decisions[dot] = torch.argmax(decisions['move_probs'][i]).item()
+                mlogits = out['move_logits'][i]
+                mdist = torch.distributions.Categorical(logits=mlogits)
+                mcode = mdist.sample().item()
+                move_decisions[dot] = mcode
+                move_logprobs[dot] = mdist.log_prob(torch.tensor(mcode))
             else:
                 move_decisions[dot] = None
-        shooter_side_dots = self.alive_left_dots if self.next_shooter_side == 'left' else self.alive_right_dots
-        if not shooter_side_dots:
-            return move_decisions, None, None, decisions
-        shooter_indices = [i for i, d in enumerate(game_state.all_dots) if d in shooter_side_dots]
-        shooter_logits = decisions['shooter_logits'][shooter_indices]
-        shooter_dist = torch.distributions.Categorical(logits=shooter_logits)
-        rel_idx = shooter_dist.sample().item()
-        shooter = shooter_side_dots[rel_idx]
-        shooter_logprob = shooter_dist.log_prob(torch.tensor(rel_idx))
-        target_side = self.alive_right_dots if self.next_shooter_side == 'left' else self.alive_left_dots
-        if not target_side:
-            return move_decisions, shooter, None, {**decisions, 'shooter_logprob': shooter_logprob}
-        shooter_node_idx = game_state.all_dots.index(shooter)
-        target_scores, candidates = [], []
-        score_idx = 0
-        for i in range(len(game_state.all_dots)):
-            for j in range(len(game_state.all_dots)):
-                if i != j:
-                    if i == shooter_node_idx and game_state.all_dots[j] in target_side:
-                        target_scores.append(decisions['target_scores'][score_idx])
-                        candidates.append(game_state.all_dots[j])
-                    score_idx += 1
-        if target_scores:
-            logits = torch.stack(target_scores)
-            target_dist = torch.distributions.Categorical(logits=logits)
-            targ_rel = target_dist.sample().item()
-            target = candidates[targ_rel]
-            target_logprob = target_dist.log_prob(torch.tensor(targ_rel))
-        else:
-            target = random.choice(target_side)
-            target_logprob = torch.tensor(0.0)
-        decisions.update(shooter_logprob=shooter_logprob, target_logprob=target_logprob)
-        return move_decisions, shooter, target, decisions
+        shooter=None;target=None;shooter_logprob=None;target_logprob=None
+        shooter_side_dots = self.alive_left_dots if self.next_shooter_side=='left' else self.alive_right_dots
+        if shooter_side_dots:
+            shooter_indices = [i for i,d in enumerate(game_state.all_dots) if d in shooter_side_dots]
+            shooter_logits = out['shooter_logits'][shooter_indices]
+            shooter_dist = torch.distributions.Categorical(logits=shooter_logits)
+            rel_idx = shooter_dist.sample().item()
+            shooter = shooter_side_dots[rel_idx]
+            shooter_logprob = shooter_dist.log_prob(torch.tensor(rel_idx))
+            target_side = self.alive_right_dots if self.next_shooter_side=='left' else self.alive_left_dots
+            if target_side:
+                shooter_node_idx = game_state.all_dots.index(shooter)
+                target_scores,cands,score_idx = [],[],0
+                for i in range(len(game_state.all_dots)):
+                    for j in range(len(game_state.all_dots)):
+                        if i!=j:
+                            if i==shooter_node_idx and game_state.all_dots[j] in target_side:
+                                target_scores.append(out['target_scores'][score_idx])
+                                cands.append(game_state.all_dots[j])
+                            score_idx+=1
+                if target_scores:
+                    target_dist = torch.distributions.Categorical(logits=torch.stack(target_scores))
+                    t_rel = target_dist.sample().item()
+                    target = cands[t_rel]
+                    target_logprob = target_dist.log_prob(torch.tensor(t_rel))
+        decisions = {**out,'move_logprobs':move_logprobs}
+        if shooter_logprob is not None: decisions['shooter_logprob']=shooter_logprob
+        if target_logprob is not None: decisions['target_logprob']=target_logprob
+        return move_decisions,shooter,target,decisions
 
     def execute_turn(self):
         if not self.alive_left_dots or not self.alive_right_dots:
@@ -173,55 +173,48 @@ class GNNCivilWarGame:
 
     def apply_movement(self, move_decisions):
         import math
-        diag_step = move_units / math.sqrt(2)
-        for dot, move_code in move_decisions.items():
-            if dot in self.storming_side and move_code is not None:
-                direction = 1 if dot in self.alive_left_dots else -1
-                dx = dy = 0.0
-                if move_code == 1:
-                    dx = move_units * direction
-                elif move_code == 2:
-                    dx = diag_step * direction
-                    dy = diag_step
-                elif move_code == 3:
-                    dx = diag_step * direction
-                    dy = -diag_step
-                x, y = dot.pos
-                new_x = x + dx
-                new_y = y + dy
-                if hasattr(self, 'view_rect'):
-                    x0, y0, x1, y1 = self.view_rect
-                    new_x = max(min(new_x, x1 - 2), x0 + 2)
-                    new_y = max(min(new_y, y1 - 2), y0 + 2)
-                else:
-                    new_x = max(min(new_x, 796), 4)
-                    new_y = max(min(new_y, 596), 4)
-                dot.pos = (new_x, new_y)
+        diag = move_units/math.sqrt(2)
+        for dot, code in move_decisions.items():
+            if code is None or dot not in self.storming_side:
+                continue
+            # 0 = stand, 1 = forward, 2 = forward+up, 3 = forward+down
+            dir = 1 if dot in self.alive_left_dots else -1
+            dx = dir * ( move_units   if code==1 else
+                         diag         if code in (2,3) else 
+                         0.0 )
+            dy =       ( diag        if code==2 else
+                        -diag       if code==3 else
+                         0.0 )
+            x,y = dot.pos
+            nx = x+dx; ny = y+dy
+            if hasattr(self,'view_rect'):
+                x0,y0,x1,y1 = self.view_rect
+                nx = min(max(nx, x0+2), x1-2)
+                ny = min(max(ny, y0+2), y1-2)
+            else:
+                nx = min(max(nx, 4), 796)
+                ny = min(max(ny, 4), 596)
+            dot.pos = (nx,ny)
 
     def resolve_shot(self, shooter, target, game_state, raw_decisions):
-        left_count = len(self.alive_left_dots)
-        right_count = len(self.alive_right_dots)
-        soldier_proportion = (right_count / left_count) if self.next_shooter_side == 'left' else (left_count / right_count)
-        distance = get_euclid(target.pos[0] - shooter.pos[0], target.pos[1] - shooter.pos[1])
-        normalized_distance = (distance - full_accuracy) / (max_distance - full_accuracy)
-        accuracy_modifier = 1 - normalized_distance * distance_effect
-        hit_chance = min(soldier_proportion * accuracy_modifier * base_hit_chance, 1.0)
-        hit = random.random() < hit_chance
+        left_count, right_count = len(self.alive_left_dots), len(self.alive_right_dots)
+        soldier_proportion = (right_count/left_count) if self.next_shooter_side=='left' else (left_count/right_count)
+        dx, dy = target.pos[0]-shooter.pos[0], target.pos[1]-shooter.pos[1]
+        distance = get_euclid(dx, dy)
+        normalized_distance = (distance-full_accuracy)/(max_distance-full_accuracy)
+        accuracy_modifier = 1 - normalized_distance*distance_effect
+        hit_chance = min(soldier_proportion*accuracy_modifier*base_hit_chance,1.0)
+        hit = random.random()<hit_chance
         if hit:
-            if target in self.alive_right_dots:
-                self.alive_right_dots.remove(target)
-            elif target in self.alive_left_dots:
-                self.alive_left_dots.remove(target)
-        storming_side_name = 'left' if self.storming_side is self.alive_left_dots else 'right'
+            if target in self.alive_right_dots: self.alive_right_dots.remove(target)
+            elif target in self.alive_left_dots: self.alive_left_dots.remove(target)
         self.game_history.append({
-            'game_state': game_state,
             'decisions': raw_decisions,
             'shooter_side': self.next_shooter_side,
             'hit': hit,
-            'left_count': left_count,
-            'right_count': right_count,
-            'storming_side_name': storming_side_name})
-        self.next_shooter_side = 'right' if self.next_shooter_side == 'left' else 'left'
+            'hit_chance': hit_chance
+        })
+        self.next_shooter_side = 'right' if self.next_shooter_side=='left' else 'left'  
 
     def get_winner(self):
         left_alive = len(self.alive_left_dots) > 0
@@ -238,19 +231,14 @@ class GNNCivilWarGame:
     def calculate_loss(self, winner):
         total_loss = torch.tensor(0.0, device=next(self.model.parameters()).device)
         for turn in self.game_history:
-            dec = turn['decisions']
-            side = turn['shooter_side']
-            if winner == 'tie':
-                outcome = 0.0
-            elif winner == side:
-                outcome = 1.0
-            else:
-                outcome = -1.0
+            dec, side, hc = turn['decisions'], turn['shooter_side'], turn['hit_chance']
+            outcome = 0.0 if winner=='tie' else (1.0 if winner==side else -1.0)
             if 'shooter_logprob' in dec:
-                total_loss += -dec['shooter_logprob'] * outcome
+                total_loss += -dec['shooter_logprob']*outcome
             if 'target_logprob' in dec:
-                total_loss += -dec['target_logprob'] * outcome * 0.01
-        return total_loss / max(len(self.game_history), 1)
+                # weight the target step by how likely the shot was to hit
+                total_loss += -dec['target_logprob']*(hc*outcome)*0.01
+        return total_loss / max(len(self.game_history),1)
 
     def train_step(self, winner):
         loss = self.calculate_loss(winner)
