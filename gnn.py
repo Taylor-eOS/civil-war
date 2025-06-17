@@ -287,6 +287,8 @@ def train_model(num_episodes=1000, model_save_path='model.pth'):
             print(f"Average loss: {np.mean(losses[-200:]):.4f}")
             print(f"Learning rate: {game.optimizer.param_groups[0]['lr']:.6f}")
             print()
+        if (episode + 1) % 1000 == 0:
+            torch.save(game.model.state_dict(), model_save_path)
     torch.save(game.model.state_dict(), model_save_path)
     print(f"Model saved to {model_save_path}")
     return win_stats, losses
